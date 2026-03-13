@@ -629,7 +629,6 @@ class MLOPPrefetcher(QueuedPrefetcher):
                 queue",
     )
 
-    # MLOP is a degree one prefetcher
     degree = Param.Int(1, "Number of prefetches to generate")
 
     queue_squash = True

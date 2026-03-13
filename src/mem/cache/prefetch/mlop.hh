@@ -40,19 +40,19 @@
  */
 
 /**
- * Implementation of the 'A Best-Offset Prefetcher'
+ * Implementation of the 'Multiple Lookahead Offset Prefetcher'
  * Reference:
- *   Michaud, P. (2015, June). A best-offset prefetcher.
- *   In 2nd Data Prefetching Championship.
+ *   Mehran Shakerinava, Mohammad Bakhshalipour, Pejman Lotfi-Kamran, Hamid
+ *  Sarbazi-Azad (2019)
+ *  In 3rd Data Prefetching Championship.
+ *
+ * Implementation based upon BOP, see bop.cc, bop.hh
  */
 
 #ifndef __MEM_CACHE_PREFETCH_MLOP_HH__
 #define __MEM_CACHE_PREFETCH_MLOP_HH__
 
-#include <queue>
-
 #include "mem/cache/prefetch/queued.hh"
-#include "mem/packet.hh"
 
 namespace gem5
 {
@@ -88,7 +88,15 @@ class MLOP : public Queued
 
     /** Structure to save the offset and the score */
     typedef std::pair<int16_t, uint8_t> OffsetListEntry;
-    std::vector<OffsetListEntry> offsetsList;
+    std::vector<std::vector<OffsetListEntry>> offsetsList;
+    std::vector<uint8_t> phaseDegreeBestOffset;
+    uint8_t currentOffsetIdx;
+
+    /** Best offsets to use for actual prefetching */
+    std::vector<uint8_t> shouldPrefetch;
+    std::vector<uint8_t> degreeBestOffset;
+
+    unsigned int bestScore;
 
     /** In a first implementation of the BO prefetcher, both banks of the
      *  RR were written simultaneously when a prefetched line is inserted
@@ -110,16 +118,6 @@ class MLOP : public Queued
     void delayQueueEventWrapper();
     EventFunctionWrapper delayQueueEvent;
 
-    /** Hardware prefetcher enabled */
-    bool issuePrefetchRequests;
-    /** Current best offset to issue prefetches */
-    Addr bestOffset;
-    /** Current best offset found in the learning phase */
-    Addr phaseBestOffset;
-    /** Current test offset index */
-    std::vector<OffsetListEntry>::iterator offsetsListIterator;
-    /** Max score found so far */
-    unsigned int bestScore;
     /** Current round */
     unsigned int round;
 

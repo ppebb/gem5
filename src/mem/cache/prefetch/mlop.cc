@@ -59,12 +59,10 @@ MLOP::MLOP(const MLOPPrefetcherParams &p)
       delayQueueEnabled(p.delay_queue_enable),
       delayQueueSize(p.delay_queue_size),
       delayTicks(cyclesToTicks(p.delay_queue_cycles)),
+      phaseDegreeBestOffset(p.degree),
+      shouldPrefetch(p.degree),
+      degreeBestOffset(p.degree),
       delayQueueEvent([this] { delayQueueEventWrapper(); }, name()),
-      issuePrefetchRequests(false),
-      bestOffset(1),
-      phaseBestOffset(0),
-      bestScore(0),
-      round(0),
       degree(p.degree)
 {
     if (!isPowerOf2(rrEntries)) {
@@ -102,23 +100,26 @@ MLOP::MLOP(const MLOPPrefetcherParams &p)
             }
         }
 
-        if (offset == 1) {
-            offsetsList.push_back(OffsetListEntry(offset_i, 0));
-            i++;
-            /*
-             * If we want to use negative offsets, add also the negative value
-             * of the offset just calculated
-             */
-            if (p.negative_offsets_enable) {
-                offsetsList.push_back(OffsetListEntry(-offset_i, 0));
+        for (size_t j = 0; j < degree; j++) {
+            if (offset == 1) {
+                offsetsList[j].push_back(OffsetListEntry(offset_i, 0));
                 i++;
+                /*
+                 * If we want to use negative offsets, add also the negative
+                 * value of the offset just calculated
+                 */
+                if (p.negative_offsets_enable) {
+                    offsetsList[j].push_back(OffsetListEntry(-offset_i, 0));
+                    i++;
+                }
             }
         }
 
         offset_i++;
     }
 
-    offsetsListIterator = offsetsList.begin();
+    bestScore = 0;
+    currentOffsetIdx = 0;
 }
 
 void
@@ -209,8 +210,10 @@ MLOP::insertIntoDelayQueue(Addr x)
 void
 MLOP::resetScores()
 {
-    for (auto &it : offsetsList) {
-        it.second = 0;
+    for (auto &degree_it : offsetsList) {
+        for (auto &it : degree_it) {
+            it.second = 0;
+        }
     }
 }
 
@@ -241,36 +244,48 @@ MLOP::testRR(Addr addr_tag) const
 void
 MLOP::bestOffsetLearning(Addr addr)
 {
-    Addr offset_tag = (*offsetsListIterator).first;
-
     /*
      * Compute the lookup tag for the RR table. As tags are generated using
      * lower 12 bits we subtract offset from the full address rather than the
      * tag to avoid integer underflow.
      */
-    Addr lookup_tag = tag((addr) - (offset_tag << lBlkSize));
 
-    // There was a hit in the RR table, increment the score for this offset
-    if (testRR(lookup_tag)) {
-        DPRINTF(HWPrefetch, "Address %#lx found in the RR table\n",
-                lookup_tag);
-        (*offsetsListIterator).second++;
-        if ((*offsetsListIterator).second > bestScore) {
-            bestScore = (*offsetsListIterator).second;
-            phaseBestOffset = (*offsetsListIterator).first;
-            DPRINTF(HWPrefetch, "New best score is %lu\n", bestScore);
+    for (int i = 0; i < degree; i++) {
+        // Tag calculated as the current offset times the degree
+        Addr offset_tag = offsetsList[i][currentOffsetIdx].first * (i + 1);
+        Addr lookup_tag = tag((addr) - (offset_tag << lBlkSize));
+
+        // There was a hit in the RR table, increment the score for this offset
+        if (testRR(lookup_tag)) {
+            DPRINTF(HWPrefetch,
+                    "Address %#lx found in the RR table for degree %d, offset "
+                    "%#lx\n",
+                    lookup_tag, i + 1, offset_tag);
+            offsetsList[i][currentOffsetIdx].second++;
+            int score = offsetsList[i][currentOffsetIdx].second;
+
+            if (score > offsetsList[i][phaseDegreeBestOffset[i]].second) {
+                phaseDegreeBestOffset[i] = currentOffsetIdx;
+                DPRINTF(HWPrefetch,
+                        "New best score is %lu for degree %d offset %d\n",
+                        score, i + 1, offsetsList[i][currentOffsetIdx].first);
+            }
+
+            if (score > bestScore) {
+                bestScore = score;
+            }
         }
     }
 
     // Move the offset iterator forward to prepare for the next time
-    offsetsListIterator++;
+    currentOffsetIdx++;
 
     /*
      * All the offsets in the list were visited meaning that a learning
      * phase finished. Check if
      */
-    if (offsetsListIterator == offsetsList.end()) {
-        offsetsListIterator = offsetsList.begin();
+    if (currentOffsetIdx == offsetsList[0].size()) {
+        currentOffsetIdx = 0;
         round++;
     }
 
@@ -283,16 +298,24 @@ MLOP::bestOffsetLearning(Addr addr)
          * enable prefetching (badScore), reset the learning structures and
          * enable prefetch generation
          */
-        if (bestScore > badScore) {
-            bestOffset = phaseBestOffset;
-            round = 0;
-            issuePrefetchRequests = true;
-        } else {
-            issuePrefetchRequests = false;
+
+        for (int i = 0; i < degree; i++) {
+            int phaseDegreeBestScore =
+                offsetsList[i][phaseDegreeBestOffset[i]].second;
+            if (phaseDegreeBestScore > badScore) {
+                degreeBestOffset[i] = phaseDegreeBestOffset[i];
+                shouldPrefetch[i] = true;
+            } else {
+                shouldPrefetch[i] = false;
+            }
         }
+
         resetScores();
         bestScore = 0;
-        phaseBestOffset = 0;
+
+        for (int i = 0; i < phaseDegreeBestOffset.size(); i++) {
+            phaseDegreeBestOffset[i] = 0;
+        }
     }
 }
 
@@ -316,13 +339,25 @@ MLOP::calculatePrefetch(const PrefetchInfo &pfi,
      */
     bestOffsetLearning(addr);
 
-    if (issuePrefetchRequests) {
-        for (int i = 1; i <= degree; i++) {
-            Addr prefetch_addr = addr + ((i * bestOffset) << lBlkSize);
+    for (int i = 0; i < degree; i++) {
+        if (shouldPrefetch[i]) {
+            // Addr calculated as degree (i + 1) times its best offset
+            Addr prefetch_addr =
+                addr + (((i + 1) * offsetsList[i][degreeBestOffset[i]].first)
+                        << lBlkSize);
             addresses.push_back(AddrPriority(prefetch_addr, 0));
-            DPRINTF(HWPrefetch, "Generated prefetch %#lx\n", prefetch_addr);
+            DPRINTF(HWPrefetch, "Generated prefetch %#lx for degree %d\n",
+                    prefetch_addr, i);
         }
     }
+
+    // if (issuePrefetchRequests) {
+    //     for (int i = 1; i <= degree; i++) {
+    //         Addr prefetch_addr = addr + ((i * bestOffset) << lBlkSize);
+    //         addresses.push_back(AddrPriority(prefetch_addr, 0));
+    //         DPRINTF(HWPrefetch, "Generated prefetch %#lx\n", prefetch_addr);
+    //     }
+    // }
 }
 
 void
@@ -338,8 +373,12 @@ MLOP::notifyFill(const CacheAccessProbeArg &arg)
     Addr addr = pkt->getAddr();
     Addr tag_y = tag(addr);
 
-    if (issuePrefetchRequests) {
-        insertIntoRR(addr, tag_y - bestOffset, RRWay::Right);
+    for (int i = 0; i < shouldPrefetch.size(); i++) {
+        if (shouldPrefetch[i]) {
+            insertIntoRR(addr,
+                         tag_y - offsetsList[i][degreeBestOffset[i]].first,
+                         RRWay::Right);
+        }
     }
 }
 
