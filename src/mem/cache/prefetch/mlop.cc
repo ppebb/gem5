@@ -59,6 +59,7 @@ MLOP::MLOP(const MLOPPrefetcherParams &p)
       delayQueueEnabled(p.delay_queue_enable),
       delayQueueSize(p.delay_queue_size),
       delayTicks(cyclesToTicks(p.delay_queue_cycles)),
+      offsetsList(p.degree),
       phaseDegreeBestOffset(p.degree),
       shouldPrefetch(p.degree),
       degreeBestOffset(p.degree),
@@ -87,37 +88,45 @@ MLOP::MLOP(const MLOPPrefetcherParams &p)
      * Following the paper implementation, a list with the specified number
      * of offsets which are of the form 2^i * 3^j * 5^k with i,j,k >= 0
      */
+
+    std::vector<int64_t> baseOffsets;
+    baseOffsets.reserve(p.offset_list_size);
+
     const int factors[] = {2, 3, 5};
-    unsigned int i = 0;
     int64_t offset_i = 1;
 
-    while (i < p.offset_list_size) {
+    while (baseOffsets.size() < p.offset_list_size) {
         int64_t offset = offset_i;
 
         for (int n : factors) {
-            while ((offset % n) == 0) {
+            while (offset % n == 0) {
                 offset /= n;
             }
         }
 
-        for (size_t j = 0; j < degree; j++) {
-            if (offset == 1) {
-                offsetsList[j].push_back(OffsetListEntry(offset_i, 0));
-                i++;
-                /*
-                 * If we want to use negative offsets, add also the negative
-                 * value of the offset just calculated
-                 */
-                if (p.negative_offsets_enable) {
-                    offsetsList[j].push_back(OffsetListEntry(-offset_i, 0));
-                    i++;
-                }
+        if (offset == 1) {
+            baseOffsets.push_back(offset_i);
+
+            if (p.negative_offsets_enable &&
+                baseOffsets.size() < p.offset_list_size) {
+                baseOffsets.push_back(-offset_i);
             }
         }
 
         offset_i++;
     }
 
+    offsetsList.resize(degree);
+
+    for (int d = 0; d < degree; d++) {
+        offsetsList[d].reserve(p.offset_list_size);
+        for (auto off : baseOffsets) {
+            offsetsList[d].push_back({off, 0});
+        }
+    }
+
+    assert(offsetsList.size() == degree);
+    assert(offsetsList[0].size() == p.offset_list_size);
     bestScore = 0;
     currentOffsetIdx = 0;
 }
